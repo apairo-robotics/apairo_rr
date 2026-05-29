@@ -15,8 +15,8 @@ dependencies = [
     "numpy",
     "rerun-sdk",
     "PyYAML",
-    "apairo @ file:///home/abresset/dev/apairo",
-    "apairo_preprocess @ file:///home/abresset/dev/apairo_preprocess",
+    "apairo @ git+https://github.com/apairo-robotics/apairo.git",
+    "apairo-preprocess @ git+https://github.com/apairo-robotics/apairo_preprocess.git",
 ]
 
 [project.optional-dependencies]
