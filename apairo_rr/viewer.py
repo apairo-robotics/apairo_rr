@@ -15,7 +15,19 @@ _CONFIGS_DIR = Path(__file__).parent / "configs"
 
 
 def load_label_config(name: str) -> dict:
-    """Load a built-in label config by name (``"rellis"``, ``"goose"``, ``"semantic_kitti"``)."""
+    """Load a built-in label config by name.
+
+    Args:
+        name: One of ``"rellis"``, ``"semantic_kitti"``, ``"goose"``.
+
+    Returns:
+        Dict with ``color_map`` (``{class_id: [R, G, B]}``) and
+        ``semantic_map`` (``{class_id: label_str}``) keys, ready to pass
+        to :func:`view` as ``label_cfg`` or ``label_cfgs``.
+
+    Raises:
+        FileNotFoundError: If *name* does not match any built-in config.
+    """
     import yaml
     path = _CONFIGS_DIR / f"{name}.yaml"
     if not path.exists():
@@ -65,17 +77,28 @@ def view(
 ) -> None:
     """Log an apairo dataset to the Rerun viewer.
 
+    Opens the Rerun viewer with one :class:`~rerun.blueprint.Spatial3DView` per
+    pipeline, arranged side-by-side.  If the dataset exposes ``sequence_ids``
+    (all :class:`~apairo.core.ProfiledDataset` subclasses), a **Sequence**
+    text panel is added above the 3D views and updates as you scrub the timeline.
+
     Args:
         dataset:        Any apairo dataset supporting ``dataset[idx]`` → ``Sample``.
-        label_cfg:      Single label config dict applied to all pipelines.
-        label_cfgs:     Per-pipeline label configs (overrides ``label_cfg``).
-        poses:          List of 4×4 pose matrices for the trajectory overlay.
-        pipelines:      List of :class:`Pipeline` objects.  Defaults to one raw pipeline.
-        point_key:      Key for the point cloud in each sample.
-        label_key:      Key for semantic labels in each sample.
-        frames:         Subset of frame indices to log.  Defaults to all frames.
-        application_id: Rerun application name.
-        spawn:          Whether to spawn the Rerun viewer automatically.
+        label_cfg:      Single label config applied to all pipelines.
+        label_cfgs:     Per-pipeline label configs; overrides ``label_cfg``.
+                        Use :func:`load_label_config` to obtain built-in configs.
+        poses:          List of 4×4 pose matrices (one per dataset frame).
+                        Logs a static trajectory and a per-frame robot marker.
+        pipelines:      Ordered list of :class:`Pipeline` objects.
+                        Defaults to a single ``Pipeline("Raw")``.
+        point_key:      Sample key for the point cloud array (default ``"lidar"``).
+        label_key:      Sample key for per-point semantic labels (default ``"labels"``).
+                        Set to ``None`` to disable label colouring.
+        frames:         Iterable of global frame indices to log.
+                        Defaults to all frames in *dataset*.
+        application_id: Rerun recording name shown in the viewer.
+        spawn:          If ``True`` (default), launch the Rerun viewer process.
+                        Set to ``False`` when saving to a ``.rrd`` file instead.
     """
     if pipelines is None:
         pipelines = [Pipeline("Raw")]
@@ -93,12 +116,24 @@ def view(
     # ------------------------------------------------------------------ init
     rr.init(application_id, spawn=spawn)
 
+    # Build frame→sequence mapping if the dataset supports it.
+    seq_map: dict[int, str] = {}
+    if hasattr(dataset, "sequence_ids"):
+        for sid in dataset.sequence_ids:
+            for i in dataset.sequence(sid)._indices:
+                seq_map[i] = sid
+
     # Blueprint: one Spatial3DView per pipeline, side-by-side
     views = [
         rrb.Spatial3DView(origin=f"/{pipe.name}", name=pipe.name)
         for pipe in pipelines
     ]
-    layout = rrb.Horizontal(*views) if len(views) > 1 else views[0]
+    spatial = rrb.Horizontal(*views) if len(views) > 1 else views[0]
+    if seq_map:
+        seq_view = rrb.TextDocumentView(origin="/info/sequence", name="Sequence")
+        layout = rrb.Vertical(seq_view, spatial, row_shares=[1, 12])
+    else:
+        layout = spatial
     rr.send_blueprint(rrb.Blueprint(layout, auto_layout=False, auto_views=False))
 
     # Annotation contexts (static — logged once, apply to all frames)
@@ -132,6 +167,10 @@ def view(
         lbl_raw: np.ndarray | None = None
         if label_key and label_key in sample.data:
             lbl_raw = np.asarray(sample.data[label_key], dtype=np.int64)
+
+        # Sequence label
+        if seq_map:
+            rr.log("/info/sequence", rr.TextDocument(seq_map.get(frame_idx, "?")))
 
         # Robot position along trajectory
         if poses is not None and frame_idx < len(poses):
