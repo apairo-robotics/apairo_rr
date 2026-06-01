@@ -27,7 +27,7 @@ _DEFAULT_ROOT = Path.home() / "data" / "rellis"
 
 TRAVERSABILITY_TRAJECTORY_CFG = {
     "robot_radius": 1.0,
-    "height_min":  -1.0,
+    "height_min":  -5.0,
     "height_max":  0.5,
     "forward_window": None,
     "sequence_gap":  5.0,
