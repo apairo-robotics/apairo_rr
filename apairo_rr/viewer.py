@@ -74,6 +74,9 @@ def view(
     frames:     Iterable[int] | None = None,
     application_id: str = "apairo_rr",
     spawn: bool = True,
+    web: bool = False,
+    web_port: int = 9090,
+    grpc_port: int = 9876,
 ) -> None:
     """Log an apairo dataset to the Rerun viewer.
 
@@ -99,6 +102,12 @@ def view(
         application_id: Rerun recording name shown in the viewer.
         spawn:          If ``True`` (default), launch the Rerun viewer process.
                         Set to ``False`` when saving to a ``.rrd`` file instead.
+                        Ignored when ``web=True``.
+        web:            If ``True``, serve a web viewer instead of spawning the
+                        desktop app.  Any browser on the same local network can
+                        open the URL that is printed to the console.
+        web_port:       HTTP port for the web viewer (default 9090).
+        grpc_port:      gRPC port for the data stream (default 9876).
     """
     if pipelines is None:
         pipelines = [Pipeline("Raw")]
@@ -114,7 +123,21 @@ def view(
         resolved = [label_cfg] * n_pipe
 
     # ------------------------------------------------------------------ init
-    rr.init(application_id, spawn=spawn)
+    if web:
+        import socket
+        rr.init(application_id, spawn=False)
+        rr.serve_grpc(grpc_port=grpc_port, cors_allow_origin=["*"])
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as _s:
+            try:
+                _s.connect(("10.255.255.255", 1))
+                _host_ip = _s.getsockname()[0]
+            except OSError:
+                _host_ip = "127.0.0.1"
+        _grpc_url = f"rerun+http://{_host_ip}:{grpc_port}/proxy"
+        rr.serve_web_viewer(connect_to=_grpc_url, web_port=web_port, open_browser=False)
+        print(f"Web viewer → http://{_host_ip}:{web_port}  (connect to {_grpc_url})")
+    else:
+        rr.init(application_id, spawn=spawn)
 
     # Build frame→sequence mapping if the dataset supports it.
     seq_map: dict[int, str] = {}
@@ -202,4 +225,13 @@ def view(
         if (count + 1) % 100 == 0:
             print(f"  {count + 1}/{n}")
 
-    print("Done — open the Rerun viewer to explore.")
+    if web:
+        print("Done — press Ctrl-C to stop the server.")
+        try:
+            import time
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            pass
+    else:
+        print("Done — open the Rerun viewer to explore.")
