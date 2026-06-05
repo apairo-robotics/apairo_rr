@@ -86,7 +86,7 @@ def view(
     text panel is added above the 3D views and updates as you scrub the timeline.
 
     Args:
-        dataset:        Any apairo dataset supporting ``dataset[idx]`` → ``Sample``.
+        dataset:        Any apairo dataset supporting ``dataset[idx]`` -> ``Sample``.
         label_cfg:      Single label config applied to all pipelines.
         label_cfgs:     Per-pipeline label configs; overrides ``label_cfg``.
                         Use :func:`load_label_config` to obtain built-in configs.
@@ -135,11 +135,11 @@ def view(
                 _host_ip = "127.0.0.1"
         _grpc_url = f"rerun+http://{_host_ip}:{grpc_port}/proxy"
         rr.serve_web_viewer(connect_to=_grpc_url, web_port=web_port, open_browser=False)
-        print(f"Web viewer → http://{_host_ip}:{web_port}  (connect to {_grpc_url})")
+        print(f"Web viewer -> http://{_host_ip}:{web_port}?url={_grpc_url}")
     else:
         rr.init(application_id, spawn=spawn)
 
-    # Build frame→sequence mapping if the dataset supports it.
+    # Build frame->sequence mapping if the dataset supports it.
     seq_map: dict[int, str] = {}
     if hasattr(dataset, "sequence_ids"):
         for sid in dataset.sequence_ids:

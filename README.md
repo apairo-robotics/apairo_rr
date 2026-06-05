@@ -42,7 +42,7 @@ Main entry point.  Logs a dataset to the Rerun viewer.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `dataset` | apairo dataset | Any dataset supporting `dataset[idx]` → `Sample` |
+| `dataset` | apairo dataset | Any dataset supporting `dataset[idx]` -> `Sample` |
 | `label_cfg` | `dict \| None` | Label config applied to all pipelines |
 | `label_cfgs` | `list[dict \| None]` | Per-pipeline label configs (overrides `label_cfg`) |
 | `poses` | `list[np.ndarray]` | 4×4 pose matrices — logs a trajectory overlay |
