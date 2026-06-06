@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import types
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Callable, Optional
 
 import numpy as np
 
@@ -20,15 +20,35 @@ class Pipeline:
     objects are also accepted directly as steps — their ``process(sample)``
     method is called automatically with the right keys.
 
+    For continuous scalar visualisation, pass a *colormap_fn* instead of
+    relying on the default Z-based height colouring.  The function receives
+    the full ``pts`` array (after all steps) and must return an ``(N, 3)``
+    uint8 RGB array::
+
+        def my_colormap(pts: np.ndarray) -> np.ndarray:
+            v = pts[:, 4]                          # read scalar from extra col
+            t = (v - v.min()) / (v.ptp() + 1e-6)  # normalise to [0, 1]
+            rgb = np.zeros((len(v), 3), dtype=np.uint8)
+            rgb[:, 0] = (255 * (1 - t)).astype(np.uint8)
+            rgb[:, 2] = (255 * t).astype(np.uint8)
+            return rgb
+
+        Pipeline("Scalar channel", colormap_fn=my_colormap)
+
+    When *colormap_fn* is set the default ``_height_colors(pts[:,2])`` fallback
+    is skipped, so point positions remain correct regardless of the scalar.
+
     Examples::
 
         Pipeline("Raw")
         Pipeline("Range filter", [range_filter])
         Pipeline("Trav — labels", [range_filter, TraversabilityFromLabels()])
+        Pipeline("Ground height", colormap_fn=lambda pts: height_colors(pts[:, 4]))
     """
 
     name: str
     steps: list[Callable] = field(default_factory=list)
+    colormap_fn: Optional[Callable[[np.ndarray], np.ndarray]] = None
 
     def run(
         self,

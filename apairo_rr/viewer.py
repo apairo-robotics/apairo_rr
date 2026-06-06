@@ -218,6 +218,9 @@ def view(
                     class_ids=labels.astype(np.uint16),
                     radii=rr.Radius.ui_points(2.0),
                 ))
+            elif pipe.colormap_fn is not None:
+                colors = pipe.colormap_fn(pts)
+                rr.log(f"/{pipe.name}/lidar", rr.Points3D(xyz, colors=colors, radii=0.02))
             else:
                 colors = _height_colors(pts[:, 2])
                 rr.log(f"/{pipe.name}/lidar", rr.Points3D(xyz, colors=colors, radii=0.02))
