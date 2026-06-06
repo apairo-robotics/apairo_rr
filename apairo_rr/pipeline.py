@@ -18,16 +18,23 @@ class Pipeline:
 
     Steps are applied in order.  apairo_preprocess ``FramePreprocessor``
     objects are also accepted directly as steps — their ``process(sample)``
-    method is called automatically with the right keys.
+    method is called automatically.  Unlike the old (pts, labels)-only
+    interface, steps now receive the **full Sample** so any input key
+    declared in ``step.input_keys`` is resolved from the sample without
+    hardcoding.
 
-    For continuous scalar visualisation, pass a *colormap_fn* instead of
-    relying on the default Z-based height colouring.  The function receives
-    the full ``pts`` array (after all steps) and must return an ``(N, 3)``
-    uint8 RGB array::
+    *point_key* and *label_key* name the sample channels that map to the
+    pts / labels pair returned by :meth:`run`.  They default to the apairo
+    conventions (``"lidar"`` / ``"labels"``) but can be overridden per
+    pipeline when the dataset uses different key names (e.g. ``"voxelised"``).
+
+    For continuous scalar visualisation, pass a *colormap_fn* that receives
+    the full ``pts`` array (after all steps) and returns an ``(N, 3)`` uint8
+    RGB array::
 
         def my_colormap(pts: np.ndarray) -> np.ndarray:
-            v = pts[:, 4]                          # read scalar from extra col
-            t = (v - v.min()) / (v.ptp() + 1e-6)  # normalise to [0, 1]
+            v = pts[:, 4]
+            t = (v - v.min()) / (v.ptp() + 1e-6)
             rgb = np.zeros((len(v), 3), dtype=np.uint8)
             rgb[:, 0] = (255 * (1 - t)).astype(np.uint8)
             rgb[:, 2] = (255 * t).astype(np.uint8)
@@ -36,38 +43,56 @@ class Pipeline:
         Pipeline("Scalar channel", colormap_fn=my_colormap)
 
     When *colormap_fn* is set the default ``_height_colors(pts[:,2])`` fallback
-    is skipped, so point positions remain correct regardless of the scalar.
+    is skipped, so point positions stay correct regardless of the scalar.
 
     Examples::
 
         Pipeline("Raw")
         Pipeline("Range filter", [range_filter])
         Pipeline("Trav — labels", [range_filter, TraversabilityFromLabels()])
-        Pipeline("Ground height", colormap_fn=lambda pts: height_colors(pts[:, 4]))
+        Pipeline("Ground height (voxelised)", point_key="voxelised",
+                 label_key=None, colormap_fn=lambda pts: height_colors(pts[:, 4]))
     """
 
     name: str
     steps: list[Callable] = field(default_factory=list)
     colormap_fn: Optional[Callable[[np.ndarray], np.ndarray]] = None
+    point_key: str = "lidar"
+    label_key: Optional[str] = "labels"
 
-    def run(
-        self,
-        pts: np.ndarray,
-        labels: np.ndarray | None,
-        frame_idx: int = 0,
-    ) -> tuple[np.ndarray, np.ndarray | None]:
+    def run(self, sample, frame_idx: int = 0) -> tuple[np.ndarray, np.ndarray | None]:
+        """Run all steps on *sample* and return ``(pts, labels)``.
+
+        Args:
+            sample: An apairo ``Sample`` (or any object with a ``data`` dict).
+                    The viewer passes the dataset sample directly so that
+                    FramePreprocessor steps can access any channel they declare
+                    in their ``input_keys`` — no hardcoded key mapping required.
+            frame_idx: Global frame index forwarded to steps that need it.
+        """
+        pts = np.asarray(sample.data[self.point_key], dtype=np.float32).copy()
+        labels = (
+            np.asarray(sample.data[self.label_key], dtype=np.int64).copy()
+            if self.label_key and self.label_key in sample.data
+            else None
+        )
+
         for step in self.steps:
             if hasattr(step, "process") and hasattr(step, "input_keys"):
                 if hasattr(step, "_idx"):
                     step._idx = frame_idx
-                data = {}
-                for key in step.input_keys:
-                    if key == "lidar":
-                        data["lidar"] = pts
-                    elif key == "labels" and labels is not None:
-                        data["labels"] = labels
-                sample = types.SimpleNamespace(data=data)
-                result = step.process(sample)
+                # Build sub-sample from step.input_keys.
+                # point_key / label_key map to the current (post-step) pts / labels;
+                # every other declared key is looked up in the original sample.
+                sub_data: dict = {}
+                for k in step.input_keys:
+                    if k == self.point_key:
+                        sub_data[k] = pts
+                    elif k == self.label_key and labels is not None:
+                        sub_data[k] = labels
+                    elif k in sample.data:
+                        sub_data[k] = sample.data[k]
+                result = step.process(types.SimpleNamespace(data=sub_data))
                 if result is not None:
                     labels = np.asarray(result, dtype=np.int64)
             else:
@@ -75,4 +100,5 @@ class Pipeline:
                     pts, labels = step(pts, labels, frame_idx=frame_idx)
                 except TypeError:
                     pts, labels = step(pts, labels)
+
         return pts, labels

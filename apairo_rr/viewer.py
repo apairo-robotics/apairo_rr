@@ -177,6 +177,14 @@ def view(
             static=True,
         )
 
+    # Apply view()-level defaults to pipelines that still carry the generic values.
+    # Pipelines that set their own point_key / label_key explicitly are not affected.
+    for pipe in pipelines:
+        if pipe.point_key == "lidar":
+            pipe.point_key = point_key
+        if pipe.label_key == "labels":
+            pipe.label_key = label_key
+
     # ----------------------------------------------------------------- frames
     frame_indices = list(frames) if frames is not None else range(len(dataset))
     n = len(frame_indices)
@@ -185,11 +193,7 @@ def view(
     for count, frame_idx in enumerate(frame_indices):
         rr.set_time("frame", sequence=frame_idx)
 
-        sample  = dataset[frame_idx]
-        pts_raw = np.asarray(sample.data[point_key], dtype=np.float32)
-        lbl_raw: np.ndarray | None = None
-        if label_key and label_key in sample.data:
-            lbl_raw = np.asarray(sample.data[label_key], dtype=np.int64)
+        sample = dataset[frame_idx]
 
         # Sequence label
         if seq_map:
@@ -203,13 +207,9 @@ def view(
                 colors=[[255, 200, 0]],
             ))
 
-        # Per-pipeline point clouds
+        # Per-pipeline point clouds — each pipeline resolves its own keys from sample
         for pipe, cfg in zip(pipelines, resolved):
-            pts, labels = pipe.run(
-                pts_raw.copy(),
-                lbl_raw.copy() if lbl_raw is not None else None,
-                frame_idx=frame_idx,
-            )
+            pts, labels = pipe.run(sample, frame_idx=frame_idx)
             xyz = pts[:, :3].astype(np.float64)
 
             if labels is not None and cfg is not None:
