@@ -9,6 +9,7 @@ import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
 
+from .colormaps import ColumnColormap
 from .pipeline import Pipeline
 
 _CONFIGS_DIR = Path(__file__).parent / "configs"
@@ -40,13 +41,7 @@ def _normalize_color_map(raw: dict) -> dict[int, list[int]]:
     return {int(k): [int(c) for c in v] for k, v in raw.items()}
 
 
-def _height_colors(z: np.ndarray) -> np.ndarray:
-    lo, hi = z.min(), z.max()
-    t = (z - lo) / max(hi - lo, 1e-6)
-    colors = np.zeros((len(z), 3), dtype=np.uint8)
-    colors[:, 0] = (255 * (1 - t)).astype(np.uint8)
-    colors[:, 2] = (255 * t).astype(np.uint8)
-    return colors
+_default_colormap = ColumnColormap(2)
 
 
 def _annotation_context(cfg: dict) -> list[rr.ClassDescription]:
@@ -77,6 +72,8 @@ def view(
     web: bool = False,
     web_port: int = 9090,
     grpc_port: int = 9876,
+    point_radius: float | None = None,
+    max_points: int | None = None,
 ) -> None:
     """Log an apairo dataset to the Rerun viewer.
 
@@ -108,6 +105,12 @@ def view(
                         open the URL that is printed to the console.
         web_port:       HTTP port for the web viewer (default 9090).
         grpc_port:      gRPC port for the data stream (default 9876).
+        point_radius:   World-space radius for all logged point clouds.
+                        Overrides the per-case defaults (``ui_points(2.0)`` for
+                        labelled clouds, ``0.02`` m otherwise).
+        max_points:     If set, randomly subsample each frame to at most this
+                        many points before logging.  Reduces Rerun memory usage
+                        at the cost of visual density (e.g. ``max_points=5000``).
     """
     if pipelines is None:
         pipelines = [Pipeline("Raw")]
@@ -210,20 +213,30 @@ def view(
         # Per-pipeline point clouds — each pipeline resolves its own keys from sample
         for pipe, cfg in zip(pipelines, resolved):
             pts, labels = pipe.run(sample, frame_idx=frame_idx)
+
+            if max_points is not None and len(pts) > max_points:
+                idx = np.random.choice(len(pts), max_points, replace=False)
+                pts = pts[idx]
+                if labels is not None:
+                    labels = labels[idx]
+
             xyz = pts[:, :3].astype(np.float64)
 
             if labels is not None and cfg is not None:
+                radius = point_radius if point_radius is not None else rr.Radius.ui_points(2.0)
                 rr.log(f"/{pipe.name}/lidar", rr.Points3D(
                     xyz,
                     class_ids=labels.astype(np.uint16),
-                    radii=rr.Radius.ui_points(2.0),
+                    radii=radius,
                 ))
             elif pipe.colormap_fn is not None:
                 colors = pipe.colormap_fn(pts)
-                rr.log(f"/{pipe.name}/lidar", rr.Points3D(xyz, colors=colors, radii=0.02))
+                radius = point_radius if point_radius is not None else 0.02
+                rr.log(f"/{pipe.name}/lidar", rr.Points3D(xyz, colors=colors, radii=radius))
             else:
-                colors = _height_colors(pts[:, 2])
-                rr.log(f"/{pipe.name}/lidar", rr.Points3D(xyz, colors=colors, radii=0.02))
+                colors = _default_colormap(pts)
+                radius = point_radius if point_radius is not None else 0.02
+                rr.log(f"/{pipe.name}/lidar", rr.Points3D(xyz, colors=colors, radii=radius))
 
         if (count + 1) % 100 == 0:
             print(f"  {count + 1}/{n}")

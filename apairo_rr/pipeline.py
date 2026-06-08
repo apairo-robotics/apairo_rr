@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import types
 from dataclasses import dataclass, field
-from typing import Callable, Optional
+from typing import Callable, Optional, Union
 
 import numpy as np
+
+from .colormaps import Colormap
 
 
 @dataclass
@@ -56,7 +58,7 @@ class Pipeline:
 
     name: str
     steps: list[Callable] = field(default_factory=list)
-    colormap_fn: Optional[Callable[[np.ndarray], np.ndarray]] = None
+    colormap_fn: Optional[Union[Colormap, Callable[[np.ndarray], np.ndarray]]] = None
     point_key: str = "lidar"
     label_key: Optional[str] = "labels"
 
