@@ -21,8 +21,8 @@ import apairo
 import apairo_rr
 from apairo_rr import Pipeline
 from apairo_preprocess import TraversabilityFromLabels, TraversabilityFromTrajectory
+from apairo_transform import RangeFilter
 
-_DEFAULT_ROOT = Path.home() / "data" / "rellis"
 
 
 TRAVERSABILITY_TRAJECTORY_CFG = {
@@ -34,18 +34,11 @@ TRAVERSABILITY_TRAJECTORY_CFG = {
 }
 
 
-def range_filter(pts, labels, max_r=50.0):
-    mask = np.linalg.norm(pts[:, :3], axis=1) < max_r
-    return pts[mask], labels[mask] if labels is not None else None
-
+from utils import get_generic_argparser_rellis
 
 def main() -> None:
-    p = argparse.ArgumentParser()
-    p.add_argument("--root",     default=str(_DEFAULT_ROOT))
-    p.add_argument("--sequence", default=None, help="Sequence ID to visualise (default: all)")
+    p = get_generic_argparser_rellis()
     p.add_argument("--radius",   type=float, default=None)
-    p.add_argument("--every",    type=int,   default=1, help="Log every Nth frame")
-    p.add_argument("--idx",      type=int,   default=0, help="First frame index")
     args = p.parse_args()
 
     root = Path(args.root)
@@ -70,7 +63,6 @@ def main() -> None:
     trav_traj_proc = TraversabilityFromTrajectory(poses_4x4, **cfg_trav_tj)
     trav_labs_proc = TraversabilityFromLabels()
 
-    # Resolve frame indices — optionally restricted to a single sequence.
     if args.sequence is not None:
         if args.sequence not in ds.sequence_ids:
             raise SystemExit(
@@ -87,15 +79,17 @@ def main() -> None:
     print(f"[params] root={root}, every={args.every}, idx={args.idx}, radius={args.radius}")
     print(f"[params] TraversabilityFromTrajectory cfg: {cfg_trav_tj}")
 
+    rf = RangeFilter(max=50.0)
+
     apairo_rr.view(
         ds,
         label_cfgs = [apairo_rr.load_label_config("rellis"), cfg_trav, cfg_trav],
         poses      = list(poses_4x4),
         frames     = frames,
         pipelines  = [
-            Pipeline("Semantic GT",       [range_filter]),
-            Pipeline("Trav — trajectory", [range_filter, trav_traj_proc]),
-            Pipeline("Trav — labels",     [range_filter, trav_labs_proc]),
+            Pipeline("Semantic GT",       [rf]),
+            Pipeline("Trav — trajectory", [rf, trav_traj_proc]),
+            Pipeline("Trav — labels",     [rf, trav_labs_proc]),
         ],
     )
 

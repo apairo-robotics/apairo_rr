@@ -18,19 +18,13 @@ import argparse
 import types
 from pathlib import Path
 
-import numpy as np
-
 import apairo
 import apairo_rr
 from apairo_rr import Pipeline
 from apairo_preprocess import VoxeliseLabels, VoxelisePointCloud
+from apairo_transform import RangeFilter
 
 _DEFAULT_ROOT = Path.home() / "data" / "rellis"
-
-
-def range_filter(pts, labels, max_r: float = 50.0):
-    mask = np.linalg.norm(pts[:, :3], axis=1) < max_r
-    return pts[mask], labels[mask] if labels is not None else None
 
 
 def make_voxelise_step(voxel_size: float, max_range: float | None = None):
@@ -86,6 +80,7 @@ def main() -> None:
 
     voxelise_step = make_voxelise_step(args.voxel_size, max_range=args.max_range)
     rellis_cfg = apairo_rr.load_label_config("rellis")
+    rf = RangeFilter(max=args.max_range)
 
     apairo_rr.view(
         ds,
@@ -93,7 +88,7 @@ def main() -> None:
         frames=frames,
         pipelines=[
             Pipeline("Original",
-                     [range_filter]),
+                     [rf]),
             Pipeline(f"Voxelised  {args.voxel_size} m",
                      [voxelise_step]),
         ],

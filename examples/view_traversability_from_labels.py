@@ -17,29 +17,20 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-import numpy as np
-
 import apairo
 import apairo_rr
 from apairo_rr import Pipeline
 from apairo_preprocess import TraversabilityFromLabels
+from apairo_transform import RangeFilter
 
 _DEFAULT_ROOT = Path.home() / "data" / "rellis"
 
-
-def range_filter(pts, labels, max_r: float = 50.0):
-    mask = np.linalg.norm(pts[:, :3], axis=1) < max_r
-    return pts[mask], labels[mask] if labels is not None else None
+from utils import get_generic_argparser_rellis
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
-    )
-    p.add_argument("root", nargs="?", default=str(_DEFAULT_ROOT))
-    p.add_argument("--sequence", default=None, help="Restrict to one sequence ID.")
-    p.add_argument("--every",    type=int, default=1,  help="Log every Nth frame.")
-    p.add_argument("--idx",      type=int, default=0,  help="First frame index.")
+    p = get_generic_argparser_rellis()
+
     p.add_argument("--ids", nargs="+", type=int, default=None,
                    help="Traversable class IDs. Defaults to RELLIS built-in set.")
     args = p.parse_args()
@@ -67,16 +58,18 @@ def main() -> None:
 
     cfg_trav = {
         "color_map":    {0: [200, 50, 50], 1: [50, 200, 80]},
-        "semantic_map": {0: "non-traversable", 1: "traversable"},
+        "semantic_map": {0: "not traversable", 1: "traversable"},
     }
+
+    rf = RangeFilter(max=50.0)
 
     apairo_rr.view(
         ds,
         label_cfgs=[apairo_rr.load_label_config("rellis"), cfg_trav],
         frames=frames,
         pipelines=[
-            Pipeline("Semantic GT",              [range_filter]),
-            Pipeline("Traversability — labels",  [range_filter, trav_proc]),
+            Pipeline("Semantic GT",              [rf]),
+            Pipeline("Traversability — labels",  [rf, trav_proc]),
         ],
     )
 

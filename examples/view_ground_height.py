@@ -1,18 +1,19 @@
-"""Compare CSF and RANSAC ground height estimates on RELLIS-3D.
+"""Compare CSF and RANSAC ground height estimates on RELLIS-3D (in-place, no disk write).
 
-Both channels must be precomputed on disk before running this script.
-Each pipeline colours points by height above ground (red = ground-level,
-blue = elevated).  Use ``--priors`` to also show the derived traversability
-prior  π = ½(1 − tanh(h − τ))  for each method.
+Runs ground segmentation (CSF and/or RANSAC) and height estimation in memory,
+then visualises the per-point height above ground side by side — no data written
+to disk.
 
-Requires: apairo-rr, apairo_preprocess
-Requires precomputed channels: ground_height_csf, ground_height_ransac
+Use ``--priors`` to also show the traversability prior π = ½(1 − tanh(h − τ)).
+
+Requires: apairo-rr, CSF  (pip install apairo-rr CSF)
 
 Usage::
 
     python examples/view_ground_height.py ~/data/rellis
     python examples/view_ground_height.py ~/data/rellis --sequence 00000 --every 5
     python examples/view_ground_height.py ~/data/rellis --priors --tau 1.5
+    python examples/view_ground_height.py ~/data/rellis --method ransac
 """
 
 from __future__ import annotations
@@ -24,144 +25,97 @@ import numpy as np
 
 import apairo
 import apairo_rr
-from apairo.core.sample import Sample
-from apairo_rr import Pipeline
-
-_DEFAULT_ROOT = Path.home() / "data" / "rellis"
-
-
-# ---------------------------------------------------------------------------
-# Coloring
-# ---------------------------------------------------------------------------
-
-def _red_blue(v: np.ndarray) -> np.ndarray:
-    """Normalise *v* to [0, 1] and map to a red (low) → blue (high) gradient."""
-    lo, hi = float(v.min()), float(v.max())
-    t = (v - lo) / max(hi - lo, 1e-6)
-    rgb = np.zeros((len(v), 3), dtype=np.uint8)
-    rgb[:, 0] = (255 * (1 - t)).astype(np.uint8)
-    rgb[:, 2] = (255 * t).astype(np.uint8)
-    return rgb
+from apairo_rr import Pipeline, KeyColormap, red_blue
+from apairo_rr import Preprocess
+from apairo_preprocess import (
+    GroundSegmentationCSF,
+    GroundSegmentationRANSAC,
+    GroundHeightFromLabels,
+)
 
 
-def _height_colormap(col: int):
-    """colormap_fn: colour by raw height value (metres) in column *col*."""
-    def fn(pts: np.ndarray) -> np.ndarray:
-        return _red_blue(pts[:, col])
-    return fn
-
-
-def _prior_colormap(col: int, tau: float):
-    """colormap_fn: colour by height prior  π = ½(1 − tanh(h − τ)).
-
-    Red = high prior (likely traversable), blue = low prior.
-    """
-    def fn(pts: np.ndarray) -> np.ndarray:
-        pi = 0.5 * (1.0 - np.tanh(pts[:, col] - tau))
-        return _red_blue(pi)
-    return fn
-
-
-# ---------------------------------------------------------------------------
-# Dataset helper
-# ---------------------------------------------------------------------------
-
-def _embed_scalars(keys: list[str]):
-    """sample_transform: append scalar channels as extra columns in voxelised."""
-    def _fn(sample: Sample) -> Sample:
-        pts = np.asarray(sample.data["voxelised"], dtype=np.float32)
-        extras = [
-            np.asarray(sample.data[k], dtype=np.float32)[:, None]
-            for k in keys
-        ]
-        sample.data["voxelised"] = np.hstack([pts, *extras])
-        return sample
-    return _fn
-
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
+from utils import get_generic_argparser_rellis
 
 def main() -> None:
-    p = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
-    )
-    p.add_argument("root",       nargs="?", default=str(_DEFAULT_ROOT))
-    p.add_argument("--sequence", default=None, help="Restrict to one sequence ID.")
-    p.add_argument("--every",    type=int,   default=1,   help="Log every Nth frame.")
-    p.add_argument("--idx",      type=int,   default=0,   help="First frame index.")
-    p.add_argument("--priors",   action="store_true",
-                   help="Add pipelines showing π = ½(1−tanh(h−τ)) for each method.")
-    p.add_argument("--tau",      type=float, default=2.0,
+    p = get_generic_argparser_rellis()
+    p.add_argument("--method",     choices=["csf", "ransac", "both"], default="both",
+                   help="Ground segmentation method (default: both).")
+    p.add_argument("--priors",     action="store_true",
+                   help="Add pipelines showing π = ½(1−tanh(h−τ)).")
+    p.add_argument("--tau",        type=float, default=2.0,
                    help="Height threshold τ (metres) for the prior (default: 2.0).")
+    # CSF params
+    p.add_argument("--cloth-resolution", type=float, default=0.5)
+    p.add_argument("--class-threshold",  type=float, default=0.5)
+    # RANSAC params
+    p.add_argument("--ransac-iters",     type=int,   default=200)
+    p.add_argument("--inlier-threshold", type=float, default=0.15)
     args = p.parse_args()
 
     root = Path(args.root)
     if not root.is_dir():
         raise SystemExit(f"Dataset root not found: {root}")
 
-    # Discover which height channels are available
-    scalar_keys = []
-    for key in ("ground_height_csf", "ground_height_ransac"):
-        try:
-            apairo.Rellis3DDataset(root, keys=[key])
-            scalar_keys.append(key)
-        except (KeyError, FileNotFoundError):
-            print(f"  [skip] {key} not found — run preprocess first.")
-
-    if not scalar_keys:
-        raise SystemExit(
-            "No ground height channels found.\n"
-            "Run: python -m scripts.preprocess.preprocess_wipunce "
-            "--config config/rellis_preprocess.yaml"
-        )
-
-    # Load voxelised + available height channels.
-    # sample_transform embeds the scalars as extra columns in voxelised at
-    # __getitem__ time — no disk writes (apairo synchronous transform API).
-    ds = apairo.Rellis3DDataset(root, keys=["voxelised"] + scalar_keys)
-    ds.sample_transform(_embed_scalars(scalar_keys))
-
+    ds = apairo.Rellis3DDataset(root, keys=["voxelised"])
     n = len(ds)
     print(f"  {n} scans — sequences: {ds.sequence_ids}")
-    print(f"  channels: {scalar_keys}")
 
     if args.sequence is not None:
         if args.sequence not in ds.sequence_ids:
             raise SystemExit(
                 f"Sequence '{args.sequence}' not found. Available: {ds.sequence_ids}"
             )
-        frames = ds.sequence(args.sequence)._indices[args.idx::args.every]
+        seq_frames = list(ds.sequence(args.sequence)._indices)
     else:
-        frames = range(args.idx, n, args.every)
+        seq_frames = list(range(n))
 
-    # One pipeline per channel (raw height), plus prior pipelines if requested.
-    # colormap_fn reads the scalar column directly — XYZ positions are not distorted.
+    frames = seq_frames[args.idx::args.every]
+
+    # Chain Preprocess layers — each is lazy, computed on first access per frame.
+    methods = []
+    if args.method in ("csf", "both"):
+        ds = Preprocess(GroundSegmentationCSF(
+            cloth_resolution=args.cloth_resolution,
+            class_threshold=args.class_threshold,
+        )).run(ds, seq_frames, key="ground_csf")
+        ds = Preprocess(GroundHeightFromLabels("ground_csf")).run(
+            ds, seq_frames, key="ground_height_csf"
+        )
+        methods.append(("CSF", "ground_height_csf"))
+
+    if args.method in ("ransac", "both"):
+        ds = Preprocess(GroundSegmentationRANSAC(
+            n_iter=args.ransac_iters,
+            inlier_threshold=args.inlier_threshold,
+        )).run(ds, seq_frames, key="ground_ransac")
+        ds = Preprocess(GroundHeightFromLabels("ground_ransac")).run(
+            ds, seq_frames, key="ground_height_ransac"
+        )
+        methods.append(("RANSAC", "ground_height_ransac"))
+
     pipelines = []
     label_cfgs = []
 
-    labels = {"ground_height_csf": "CSF", "ground_height_ransac": "RANSAC"}
-
-    for i, key in enumerate(scalar_keys):
-        col = 4 + i
+    for label, key in methods:
         pipelines.append(Pipeline(
-            f"Height {labels[key]} (m)",
+            f"Height {label} (m)",
             point_key="voxelised",
             label_key=None,
-            colormap_fn=_height_colormap(col),
+            colormap_fn=KeyColormap(key),
         ))
         label_cfgs.append(None)
 
     if args.priors:
-        print(f"  prior: π = ½(1 − tanh(h − {args.tau}))")
-        for i, key in enumerate(scalar_keys):
-            col = 4 + i
+        tau = args.tau
+        print(f"  prior: π = ½(1 − tanh(h − {tau}))")
+        for label, key in methods:
             pipelines.append(Pipeline(
-                f"Prior π — {labels[key]}",
+                f"Prior π — {label}",
                 point_key="voxelised",
                 label_key=None,
-                colormap_fn=_prior_colormap(col, args.tau),
+                colormap_fn=KeyColormap(
+                    key, gradient=lambda v: red_blue(0.5 * (1 - np.tanh(v - tau)))
+                ),
             ))
             label_cfgs.append(None)
 

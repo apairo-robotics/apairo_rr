@@ -15,13 +15,16 @@ dependencies = [
     "numpy",
     "rerun-sdk",
     "PyYAML",
+    
     "apairo @ git+https://github.com/apairo-robotics/apairo.git",
-    "apairo-preprocess @ git+https://github.com/apairo-robotics/apairo_preprocess.git",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest"]
-
+examples=[
+    "apairo-preprocess @ git+https://github.com/apairo-robotics/apairo_preprocess.git",
+    "apairo-transform @ git+https://github.com/apairo-robotics/apairo_transform.git",
+]
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["apairo_rr*"]

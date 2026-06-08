@@ -73,11 +73,8 @@ class Pipeline:
             frame_idx: Global frame index forwarded to steps that need it.
         """
         pts = np.asarray(sample.data[self.point_key], dtype=np.float32).copy()
-        labels = (
-            np.asarray(sample.data[self.label_key], dtype=np.int64).copy()
-            if self.label_key and self.label_key in sample.data
-            else None
-        )
+        _lv = sample.data.get(self.label_key) if self.label_key else None
+        labels = np.asarray(_lv, dtype=np.int64).copy() if _lv is not None else None
 
         for step in self.steps:
             if hasattr(step, "process") and hasattr(step, "input_keys"):
@@ -97,6 +94,12 @@ class Pipeline:
                 result = step.process(types.SimpleNamespace(data=sub_data))
                 if result is not None:
                     labels = np.asarray(result, dtype=np.int64)
+            elif hasattr(step, "compute_mask"):
+                # apairo_transform-style filter: compute mask on pts, apply to both
+                mask = step.compute_mask(pts)
+                pts = pts[mask]
+                if labels is not None:
+                    labels = labels[mask]
             else:
                 try:
                     pts, labels = step(pts, labels, frame_idx=frame_idx)

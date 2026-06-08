@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 from typing import Iterable
 
@@ -63,6 +64,7 @@ def view(
     label_cfg:  dict | None = None,
     label_cfgs: list[dict | None] | None = None,
     poses:      list[np.ndarray] | None = None,
+    pose_key:   str | None = None,
     pipelines:  list[Pipeline] | None = None,
     point_key:  str = "lidar",
     label_key:  str | None = "labels",
@@ -89,6 +91,11 @@ def view(
                         Use :func:`load_label_config` to obtain built-in configs.
         poses:          List of 4×4 pose matrices (one per dataset frame).
                         Logs a static trajectory and a per-frame robot marker.
+                        Mutually exclusive with *pose_key*.
+        pose_key:       Sample key containing the per-frame 4×4 pose matrix.
+                        Use this when the dataset was enriched with
+                        :class:`~apairo_rr.Preprocess` (e.g. ``key="pose"``).
+                        Mutually exclusive with *poses*.
         pipelines:      Ordered list of :class:`Pipeline` objects.
                         Defaults to a single ``Pipeline("Raw")``.
         point_key:      Sample key for the point cloud array (default ``"lidar"``).
@@ -188,10 +195,18 @@ def view(
         if pipe.label_key == "labels":
             pipe.label_key = label_key
 
+    # Pre-compute whether each colormap_fn accepts a sample argument.
+    _cm_takes_sample = [
+        len(inspect.signature(pipe.colormap_fn).parameters) >= 2
+        if pipe.colormap_fn is not None else False
+        for pipe in pipelines
+    ]
+
     # ----------------------------------------------------------------- frames
     frame_indices = list(frames) if frames is not None else range(len(dataset))
     n = len(frame_indices)
     print(f"Logging {n} frames × {n_pipe} pipeline(s) …")
+    _traj_positions: list[np.ndarray] = []  # incremental trajectory for pose_key
 
     for count, frame_idx in enumerate(frame_indices):
         rr.set_time("frame", sequence=frame_idx)
@@ -209,9 +224,21 @@ def view(
                 radii=0.4,
                 colors=[[255, 200, 0]],
             ))
+        elif pose_key is not None:
+            p = sample.data.get(pose_key)
+            if p is not None:
+                pos = p[:3, 3]
+                _traj_positions.append(pos)
+                if len(_traj_positions) > 1:
+                    rr.log("/world/trajectory", rr.LineStrips3D(
+                        [np.array(_traj_positions)], colors=[[80, 140, 255]]
+                    ))
+                rr.log("/world/robot", rr.Points3D(
+                    [pos], radii=0.4, colors=[[255, 200, 0]]
+                ))
 
         # Per-pipeline point clouds — each pipeline resolves its own keys from sample
-        for pipe, cfg in zip(pipelines, resolved):
+        for pipe, cfg, cm_takes_sample in zip(pipelines, resolved, _cm_takes_sample):
             pts, labels = pipe.run(sample, frame_idx=frame_idx)
 
             if max_points is not None and len(pts) > max_points:
@@ -230,7 +257,7 @@ def view(
                     radii=radius,
                 ))
             elif pipe.colormap_fn is not None:
-                colors = pipe.colormap_fn(pts)
+                colors = pipe.colormap_fn(pts, sample) if cm_takes_sample else pipe.colormap_fn(pts)
                 radius = point_radius if point_radius is not None else 0.02
                 rr.log(f"/{pipe.name}/lidar", rr.Points3D(xyz, colors=colors, radii=radius))
             else:
