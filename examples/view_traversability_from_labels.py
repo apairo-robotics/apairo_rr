@@ -23,8 +23,6 @@ from apairo_rr import Pipeline
 from apairo_preprocess import TraversabilityFromLabels
 from apairo_transform import RangeFilter
 
-_DEFAULT_ROOT = Path.home() / "data" / "rellis"
-
 from utils import get_generic_argparser_rellis
 
 

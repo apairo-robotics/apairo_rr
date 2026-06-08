@@ -73,7 +73,7 @@ def main() -> None:
 
     pipelines = [
         Pipeline("Raw",                                          []),
-        Pipeline(f"Range < {args.min_range} m with {norm}", [RangeFilter(min=args.min_range, norm=norm)]),
+        Pipeline(f"Range < {args.min_range} m ({args.norm})", [RangeFilter(min=args.min_range, norm=norm)]),
     ]
     label_cfgs = [rellis_cfg, rellis_cfg]
 
