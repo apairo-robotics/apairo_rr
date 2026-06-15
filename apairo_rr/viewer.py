@@ -71,6 +71,7 @@ def view(
     frames:     Iterable[int] | None = None,
     application_id: str = "apairo_rr",
     spawn: bool = True,
+    save: str | Path | None = None,
     web: bool = False,
     web_port: int = 9090,
     grpc_port: int = 9876,
@@ -106,7 +107,10 @@ def view(
         application_id: Rerun recording name shown in the viewer.
         spawn:          If ``True`` (default), launch the Rerun viewer process.
                         Set to ``False`` when saving to a ``.rrd`` file instead.
-                        Ignored when ``web=True``.
+                        Ignored when ``web=True`` or ``save`` is set.
+        save:           Path to a ``.rrd`` file.  When set, the recording is
+                        written to disk instead of opening the viewer.
+                        Implies ``spawn=False``.
         web:            If ``True``, serve a web viewer instead of spawning the
                         desktop app.  Any browser on the same local network can
                         open the URL that is printed to the console.
@@ -146,6 +150,10 @@ def view(
         _grpc_url = f"rerun+http://{_host_ip}:{grpc_port}/proxy"
         rr.serve_web_viewer(connect_to=_grpc_url, web_port=web_port, open_browser=False)
         print(f"Web viewer -> http://{_host_ip}:{web_port}?url={_grpc_url}")
+    elif save is not None:
+        rr.init(application_id, spawn=False)
+        rr.save(str(save))
+        print(f"Saving recording to {save} …")
     else:
         rr.init(application_id, spawn=spawn)
 
@@ -276,5 +284,7 @@ def view(
                 time.sleep(1)
         except KeyboardInterrupt:
             pass
+    elif save is not None:
+        print(f"Done — recording saved to {save}.")
     else:
         print("Done — open the Rerun viewer to explore.")
