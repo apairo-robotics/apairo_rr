@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import types
 from dataclasses import dataclass, field
 from typing import Callable, Optional, Union
@@ -7,6 +8,23 @@ from typing import Callable, Optional, Union
 import numpy as np
 
 from .colormaps import Colormap
+
+
+def _accepts_frame_idx(fn: Callable) -> bool:
+    """Whether *fn* accepts a ``frame_idx`` keyword argument.
+
+    Determined by introspecting the signature once, rather than catching
+    ``TypeError`` from a speculative call — which would silently swallow a
+    genuine ``TypeError`` raised *inside* the step and re-run it (masking the
+    bug and risking double-applied side effects).
+    """
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    if "frame_idx" in params:
+        return True
+    return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
 
 
 @dataclass
@@ -62,6 +80,9 @@ class Pipeline:
     point_key: str = "lidar"
     label_key: Optional[str] = "labels"
 
+    # Memo of whether each plain-callable step accepts frame_idx (keyed by id).
+    _frame_idx_cache: dict = field(default_factory=dict, init=False, repr=False, compare=False)
+
     def run(self, sample, frame_idx: int = 0) -> tuple[np.ndarray, np.ndarray | None]:
         """Run all steps on *sample* and return ``(pts, labels)``.
 
@@ -101,9 +122,12 @@ class Pipeline:
                 if labels is not None:
                     labels = labels[mask]
             else:
-                try:
+                accepts = self._frame_idx_cache.get(id(step))
+                if accepts is None:
+                    accepts = self._frame_idx_cache[id(step)] = _accepts_frame_idx(step)
+                if accepts:
                     pts, labels = step(pts, labels, frame_idx=frame_idx)
-                except TypeError:
+                else:
                     pts, labels = step(pts, labels)
 
         return pts, labels
