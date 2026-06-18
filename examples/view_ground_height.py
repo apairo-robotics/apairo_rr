@@ -6,6 +6,11 @@ to disk.
 
 Use ``--priors`` to also show the traversability prior π = ½(1 − tanh(h − τ)).
 
+Height is coloured on a **fixed** ``--hmin``/``--hmax`` range so that a given
+height maps to the same colour in every frame and across the CSF/RANSAC panels.
+Without a fixed range each frame renormalises on its own min/max, so the colours
+are not comparable over time — pass ``--hmin``/``--hmax`` to anchor the scale.
+
 Requires: apairo-rr, CSF  (pip install apairo-rr CSF)
 
 Usage::
@@ -14,6 +19,7 @@ Usage::
     python examples/view_ground_height.py ~/data/rellis --sequence 00000 --every 5
     python examples/view_ground_height.py ~/data/rellis --priors --tau 1.5
     python examples/view_ground_height.py ~/data/rellis --method ransac
+    python examples/view_ground_height.py ~/data/rellis --hmin 0 --hmax 5
 """
 
 from __future__ import annotations
@@ -44,6 +50,11 @@ def main() -> None:
                    help="Add pipelines showing π = ½(1−tanh(h−τ)).")
     p.add_argument("--tau",        type=float, default=2.0,
                    help="Height threshold τ (metres) for the prior (default: 2.0).")
+    p.add_argument("--hmin",       type=float, default=0.0,
+                   help="Lower bound (m) of the fixed height colour scale (default: 0.0).")
+    p.add_argument("--hmax",       type=float, default=3.0,
+                   help="Upper bound (m) of the fixed height colour scale (default: 3.0). "
+                        "Fixed range → colours comparable across frames and panels.")
     # CSF params
     p.add_argument("--cloth-resolution", type=float, default=0.5)
     p.add_argument("--class-threshold",  type=float, default=0.5)
@@ -101,7 +112,9 @@ def main() -> None:
             f"Height {label} (m)",
             point_key="voxelised",
             label_key=None,
-            colormap_fn=KeyColormap(key),
+            # Fixed [hmin, hmax] range so a given height keeps the same colour
+            # in every frame and across panels (vs. per-frame renormalisation).
+            colormap_fn=KeyColormap(key, vmin=args.hmin, vmax=args.hmax),
         ))
         label_cfgs.append(None)
 
@@ -113,8 +126,14 @@ def main() -> None:
                 f"Prior π — {label}",
                 point_key="voxelised",
                 label_key=None,
+                # π ∈ [0, 1] by construction — anchor the gradient to that
+                # domain so the colour reflects the absolute prior value, not
+                # the frame's local spread.
                 colormap_fn=KeyColormap(
-                    key, gradient=lambda v: red_blue(0.5 * (1 - np.tanh(v - tau)))
+                    key,
+                    gradient=lambda v: red_blue(
+                        0.5 * (1 - np.tanh(v - tau)), vmin=0.0, vmax=1.0
+                    ),
                 ),
             ))
             label_cfgs.append(None)
