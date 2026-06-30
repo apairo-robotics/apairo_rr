@@ -19,6 +19,14 @@ dependencies = [
     "apairo @ git+https://github.com/apairo-robotics/apairo.git",
 ]
 
+[project.scripts]
+apairo-rerun = "apairo_rr.cli:main"
+
+# Ecosystem dispatch: enables `apairo rerun ...` via apairo's plugin discovery
+# (apairo never depends on this package -- it finds it when installed).
+[project.entry-points."apairo.cli_plugins"]
+rerun = "apairo_rr.cli:main"
+
 [project.optional-dependencies]
 dev = ["pytest"]
 examples=[

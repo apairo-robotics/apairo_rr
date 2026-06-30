@@ -11,6 +11,7 @@ import rerun as rr
 import rerun.blueprint as rrb
 
 from .colormaps import ColumnColormap
+from .images import ImageChannel
 from .pipeline import Pipeline
 
 _CONFIGS_DIR = Path(__file__).parent / "configs"
@@ -45,6 +46,35 @@ def _normalize_color_map(raw: dict) -> dict[int, list[int]]:
 _default_colormap = ColumnColormap(2)
 
 
+def _frame_sequence_ids(dataset):
+    """``dataset.frame_sequence_ids`` (per global index) if available, else None.
+
+    apairo's public provenance API — correct global indexing for both
+    ``ProfiledDataset`` (Rellis…) and a ``RawDataset`` multi-sequence root, unlike
+    ``sequence()._indices`` whose base frame differs between the two.
+    """
+    try:
+        return list(dataset.frame_sequence_ids)
+    except Exception:  # noqa: BLE001 -- not an apairo dataset / no keys loaded
+        return None
+
+
+def _channel_frame(dataset, idx: int):
+    """``(channel, row)`` for global *idx* via ``frame_info``, or None.
+
+    ``channel`` is ``None`` for synchronous frames (all channels at one row), so
+    a per-channel readout only applies when it is a real channel name.
+    """
+    fi = getattr(dataset, "frame_info", None)
+    if fi is None:
+        return None
+    try:
+        ref = fi(idx)
+    except Exception:  # noqa: BLE001
+        return None
+    return (ref.channel, int(ref.row)) if ref.channel is not None else None
+
+
 def _annotation_context(cfg: dict) -> list[rr.ClassDescription]:
     color_map   = _normalize_color_map(cfg["color_map"])
     semantic_map = {int(k): v for k, v in cfg.get("semantic_map", {}).items()}
@@ -66,6 +96,7 @@ def view(
     poses:      list[np.ndarray] | None = None,
     pose_key:   str | None = None,
     pipelines:  list[Pipeline] | None = None,
+    images:     list[str | ImageChannel] | None = None,
     point_key:  str = "lidar",
     label_key:  str | None = "labels",
     frames:     Iterable[int] | None = None,
@@ -98,7 +129,21 @@ def view(
                         :class:`~apairo_rr.Preprocess` (e.g. ``key="pose"``).
                         Mutually exclusive with *poses*.
         pipelines:      Ordered list of :class:`Pipeline` objects.
-                        Defaults to a single ``Pipeline("Raw")``.
+                        Defaults to a single ``Pipeline("Raw")`` — unless
+                        *images* is given and *pipelines* is left ``None``, in
+                        which case it defaults to ``[]`` (images-only) so the
+                        viewer never assumes a ``"lidar"`` channel exists.
+                        Pass ``pipelines=[Pipeline("Raw")]`` explicitly to show
+                        both point clouds and images.
+        images:         Image channels to display as 2D views beside the point
+                        clouds, stacked vertically and updating along the
+                        timeline.  Each item is either a sample-key string or an
+                        :class:`~apairo_rr.ImageChannel` (for a custom title or a
+                        colormap on a scalar map).  RGB ``img`` channels are
+                        logged as-is; use ``ImageChannel(..., colormap=...)`` with
+                        :func:`~apairo_rr.colorize` for depth / height / cost
+                        maps.  A channel missing from a frame keeps its last value
+                        on screen, so async (multi-rate) sensors stay in sync.
         point_key:      Sample key for the point cloud array (default ``"lidar"``).
         label_key:      Sample key for per-point semantic labels (default ``"labels"``).
                         Set to ``None`` to disable label colouring.
@@ -123,8 +168,15 @@ def view(
                         many points before logging.  Reduces Rerun memory usage
                         at the cost of visual density (e.g. ``max_points=5000``).
     """
+    image_channels = [
+        ic if isinstance(ic, ImageChannel) else ImageChannel(str(ic))
+        for ic in (images or [])
+    ]
+
     if pipelines is None:
-        pipelines = [Pipeline("Raw")]
+        # Don't assume a "lidar" channel exists when the caller only asked for
+        # images; default to the Raw point cloud only when no images are given.
+        pipelines = [] if image_channels else [Pipeline("Raw")]
 
     n_pipe = len(pipelines)
 
@@ -157,24 +209,62 @@ def view(
     else:
         rr.init(application_id, spawn=spawn)
 
-    # Build frame->sequence mapping if the dataset supports it.
+    # Build frame->sequence mapping from the public provenance API (global
+    # indexing). Only worth a panel when the dataset spans several sequences.
     seq_map: dict[int, str] = {}
-    if hasattr(dataset, "sequence_ids"):
-        for sid in dataset.sequence_ids:
-            for i in dataset.sequence(sid)._indices:
-                seq_map[i] = sid
+    _fsi = _frame_sequence_ids(dataset)
+    if _fsi is not None and len({s for s in _fsi if s is not None}) > 1:
+        seq_map = {i: s for i, s in enumerate(_fsi) if s is not None}
+    elif _fsi is None and hasattr(dataset, "sequence_ids"):
+        # Legacy fallback for datasets exposing sequence()/_indices only.
+        try:
+            for sid in dataset.sequence_ids:
+                for i in dataset.sequence(sid)._indices:
+                    seq_map[i] = sid
+        except Exception:  # noqa: BLE001
+            seq_map = {}
 
-    # Blueprint: one Spatial3DView per pipeline, side-by-side
+    # Per-channel frame index: async (multi-rate) datasets interleave one channel
+    # event per global index, so the "frame" timeline alone can't tell you which
+    # lidar scan / which camera frame is showing. ``frame_info`` reports the
+    # channel + its row — surface it in a "Frames" panel.
+    show_frames = len(dataset) > 0 and _channel_frame(dataset, 0) is not None
+
+    # Blueprint: one Spatial3DView per pipeline side-by-side, with image channels
+    # stacked in a 2D column to their right.
     views = [
         rrb.Spatial3DView(origin=f"/{pipe.name}", name=pipe.name)
         for pipe in pipelines
     ]
-    spatial = rrb.Horizontal(*views) if len(views) > 1 else views[0]
-    if seq_map:
-        seq_view = rrb.TextDocumentView(origin="/info/sequence", name="Sequence")
-        layout = rrb.Vertical(seq_view, spatial, row_shares=[1, 12])
+    spatial = rrb.Horizontal(*views) if len(views) > 1 else (views[0] if views else None)
+
+    img_views = [
+        rrb.Spatial2DView(origin=f"/images/{ic.key}", name=ic.title)
+        for ic in image_channels
+    ]
+    img_panel = rrb.Vertical(*img_views) if len(img_views) > 1 else (img_views[0] if img_views else None)
+
+    if spatial is not None and img_panel is not None:
+        main = rrb.Horizontal(spatial, img_panel, column_shares=[2, 1])
+    elif spatial is not None:
+        main = spatial
+    elif img_panel is not None:
+        main = img_panel
     else:
-        layout = spatial
+        raise ValueError(
+            "Nothing to display: provide at least one pipeline or image channel."
+        )
+
+    info_views = []
+    if seq_map:
+        info_views.append(rrb.TextDocumentView(origin="/info/sequence", name="Sequence"))
+    if show_frames:
+        info_views.append(rrb.TextDocumentView(origin="/info/frames", name="Frames"))
+    if info_views:
+        info_bar = rrb.Horizontal(*info_views) if len(info_views) > 1 else info_views[0]
+        layout = rrb.Vertical(info_bar, main, row_shares=[1, 12])
+    else:
+        layout = main
     rr.send_blueprint(rrb.Blueprint(layout, auto_layout=False, auto_views=False))
 
     # Annotation contexts (static — logged once, apply to all frames)
@@ -213,17 +303,37 @@ def view(
     # ----------------------------------------------------------------- frames
     frame_indices = list(frames) if frames is not None else range(len(dataset))
     n = len(frame_indices)
-    print(f"Logging {n} frames × {n_pipe} pipeline(s) …")
+    _img_note = f" + {len(image_channels)} image channel(s)" if image_channels else ""
+    print(f"Logging {n} frames × {n_pipe} pipeline(s){_img_note} …")
     _traj_positions: list[np.ndarray] = []  # incremental trajectory for pose_key
+    _per_channel_frame: dict[str, int] = {}  # last per-channel frame index, by channel
 
     for count, frame_idx in enumerate(frame_indices):
         rr.set_time("frame", sequence=frame_idx)
 
         sample = dataset[frame_idx]
 
+        # Real time axis (seconds) for async / multi-rate datasets, so the
+        # timeline scrubs by actual sensor time rather than just event order.
+        # Synchronous samples have no timestamp -> only the "frame" axis.
+        _ts = getattr(sample, "timestamp", None)
+        if _ts is not None:
+            rr.set_time("time", duration=float(_ts))
+
         # Sequence label
         if seq_map:
             rr.log("/info/sequence", rr.TextDocument(seq_map.get(frame_idx, "?")))
+
+        # Per-channel frame index: the channel(s) updated at this event keep their
+        # own counter, so the panel shows e.g. "lidar: 1234 / camera: 567" and each
+        # line refreshes only when that sensor ticks.
+        if show_frames:
+            cr = _channel_frame(dataset, frame_idx)
+            if cr is not None:
+                _per_channel_frame[cr[0]] = cr[1]
+                rr.log("/info/frames", rr.TextDocument(
+                    "\n".join(f"{c}: {v}" for c, v in _per_channel_frame.items())
+                ))
 
         # Robot position along trajectory
         if poses is not None and frame_idx < len(poses):
@@ -247,6 +357,10 @@ def view(
 
         # Per-pipeline point clouds — each pipeline resolves its own keys from sample
         for pipe, cfg, cm_takes_sample in zip(pipelines, resolved, _cm_takes_sample):
+            # Async/multi-rate: this sensor didn't update on this frame — keep its
+            # last cloud on the timeline (symmetric with missing image channels).
+            if pipe.point_key not in sample.data:
+                continue
             pts, labels = pipe.run(sample, frame_idx=frame_idx)
 
             if max_points is not None and len(pts) > max_points:
@@ -257,21 +371,44 @@ def view(
 
             xyz = pts[:, :3].astype(np.float64)
 
+            # Resolve per-point colouring once (class ids from labels, or RGB).
+            class_ids = colors = None
             if labels is not None and cfg is not None:
+                class_ids = labels.astype(np.uint16)
                 radius = point_radius if point_radius is not None else rr.Radius.ui_points(2.0)
-                rr.log(f"/{pipe.name}/lidar", rr.Points3D(
-                    xyz,
-                    class_ids=labels.astype(np.uint16),
-                    radii=radius,
-                ))
             elif pipe.colormap_fn is not None:
-                colors = pipe.colormap_fn(pts, sample) if cm_takes_sample else pipe.colormap_fn(pts)
+                colors = np.asarray(
+                    pipe.colormap_fn(pts, sample) if cm_takes_sample else pipe.colormap_fn(pts)
+                )
                 radius = point_radius if point_radius is not None else 0.02
-                rr.log(f"/{pipe.name}/lidar", rr.Points3D(xyz, colors=colors, radii=radius))
             else:
-                colors = _default_colormap(pts)
+                colors = np.asarray(_default_colormap(pts))
                 radius = point_radius if point_radius is not None else 0.02
-                rr.log(f"/{pipe.name}/lidar", rr.Points3D(xyz, colors=colors, radii=radius))
+
+            # Drop invalid (NaN/inf) returns. Organized clouds (e.g. Ouster) pad
+            # non-returns with NaN xyz, which otherwise blow up the 3D view's
+            # auto-bounds (nothing frames) and the colormap's min/max.
+            finite = np.isfinite(xyz).all(axis=1)
+            if not finite.all():
+                xyz = xyz[finite]
+                if class_ids is not None:
+                    class_ids = class_ids[finite]
+                if colors is not None:
+                    colors = colors[finite]
+
+            if class_ids is not None:
+                rr.log(f"/{pipe.name}/lidar",
+                       rr.Points3D(xyz, class_ids=class_ids, radii=radius))
+            else:
+                rr.log(f"/{pipe.name}/lidar",
+                       rr.Points3D(xyz, colors=colors, radii=radius))
+
+        # Image channels — log the latest frame for each; missing channels keep
+        # their previous value on the timeline (async sensors stay in sync).
+        for ic in image_channels:
+            arr = ic.resolve(sample)
+            if arr is not None:
+                rr.log(f"/images/{ic.key}", rr.Image(arr))
 
         if (count + 1) % 100 == 0:
             print(f"  {count + 1}/{n}")

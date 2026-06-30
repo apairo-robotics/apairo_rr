@@ -22,10 +22,17 @@ def _normalize(v: np.ndarray, vmin: float | None, vmax: float | None) -> np.ndar
     bounds to anchor the scale so the same value maps to the same colour in
     every frame; out-of-range values are clipped.
     """
-    lo = float(v.min()) if vmin is None else float(vmin)
-    hi = float(v.max()) if vmax is None else float(vmax)
+    # nan-aware bounds: organized clouds (e.g. Ouster) carry NaN for non-returns;
+    # a plain min()/max() would poison the whole scale to NaN.  The NaN points
+    # themselves are dropped before logging (see viewer), so only valid points
+    # are coloured here.
+    finite = np.isfinite(v)
+    lo = (float(np.min(v[finite])) if finite.any() else 0.0) if vmin is None else float(vmin)
+    hi = (float(np.max(v[finite])) if finite.any() else 1.0) if vmax is None else float(vmax)
     t = (v.astype(np.float64) - lo) / max(hi - lo, 1e-6)
-    return np.clip(t, 0.0, 1.0)
+    # Map NaN/inf to 0 so the downstream uint8 cast is clean; those points are
+    # dropped before logging anyway.
+    return np.nan_to_num(np.clip(t, 0.0, 1.0), nan=0.0, posinf=1.0, neginf=0.0)
 
 
 class Colormap(ABC):
@@ -74,6 +81,42 @@ def green_red(v: np.ndarray, vmin: float | None = None, vmax: float | None = Non
     rgb[:, 1] = (255 * (1 - t)).astype(np.uint8)
     rgb[:, 0] = (255 * t).astype(np.uint8)
     return rgb
+
+
+def colorize(
+    scalar: np.ndarray,
+    gradient: Gradient = red_blue,
+    vmin: float | None = None,
+    vmax: float | None = None,
+) -> np.ndarray:
+    """Map a 2-D scalar image to an ``(H, W, 3)`` uint8 RGB image via a gradient.
+
+    Reuses the 1-D :data:`Gradient` primitives (:func:`red_blue`, :func:`green_red`)
+    by flattening the image, colouring each pixel, then restoring the 2-D shape.
+    Use it to turn a single-channel sensor map (depth, height, cost) into a colour
+    image for :class:`~apairo_rr.ImageChannel`.
+
+    Args:
+        scalar:   ``(H, W)`` (or ``(H, W, 1)``) array of per-pixel scalars.
+        gradient: A :data:`Gradient` applied to the flattened pixels.
+        vmin:     Fixed lower bound for normalisation.  Leave ``None`` to
+                  normalise on each frame's own min/max (colours not comparable
+                  across frames — the same footgun as the point gradients).
+        vmax:     Fixed upper bound for normalisation.
+
+    Example::
+
+        ImageChannel("depth_left", colormap=lambda a: colorize(a, vmin=0, vmax=30))
+    """
+    arr = np.asarray(scalar)
+    if arr.ndim == 3 and arr.shape[-1] == 1:
+        arr = arr[..., 0]
+    flat = arr.reshape(-1)
+    if vmin is None and vmax is None:
+        rgb = gradient(flat)
+    else:
+        rgb = gradient(flat, vmin=vmin, vmax=vmax)
+    return rgb.reshape(*arr.shape, 3)
 
 
 # ---------------------------------------------------------------------------
