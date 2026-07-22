@@ -35,6 +35,10 @@ apairo rerun /path/to/ds --sequence 00000 --lidar velodyne_0,velodyne_1 --camera
 apairo rerun /path/to/ds --lidar ouster_points --color height \
     --lidar-frame os_sensor --base-frame base_link --pose dlio_odom_node_odom
 
+# Ground-truth labels colouring the lidar points -- only frames the labels
+# channel actually covers are replayed.
+apairo rerun /path/to/ds --lidar velodyne_0 --labels labels --label-config semantic_kitti
+
 # Discover the channel names (run with no --lidar/--camera).
 apairo rerun /path/to/ds
 ```
@@ -44,13 +48,16 @@ apairo rerun /path/to/ds
 | `--sequence ID` | Restrict to one sequence (default: the whole dataset) |
 | `--lidar A,B` | Point-cloud channel(s) shown as 3D views (aliases resolved) |
 | `--camera A,B` | Image channel(s) shown as 2D views |
+| `--labels A,B` | Labelled point channel(s) (e.g. ground-truth semantic labels), coloured onto the matching `--lidar` channel's points rather than shown as their own view. Paired by position with `--lidar`, or one channel shared by all. Frames without a match are dropped, so the viewer replays only the labelled subset |
+| `--label-config` | Optional class colour/name legend for `--labels` (`rellis`, `semantic_kitti`, `goose`; default: inferred from `--as`). Any label id colours fine without one -- it only adds named classes for a known semantic table |
 | `--color` | Point colouring: `flat` (default), `height` (z), or `range` |
 | `--lidar-frame` / `--base-frame` | Override the static mount TF (e.g. `os_sensor`→`base_link`) |
 | `--raw` | Keep clouds in their native sensor frame (disable the automatic upright mount TF) |
 | `--pose CHANNEL` | Lift each cloud into the world frame with its per-frame pose and draw the trajectory |
 | `--range M` | Drop points farther than `M` metres |
 | `--as CLASS` | Dataset class to load with (default: `RawDataset`) |
-| `--every N` / `--idx N` | Log every Nth frame, starting at N |
+| `--start S` / `--end E` | Frame window — an integer position (`100`, `-50` from the end) or a fraction of the sequence as a float in `[0,1]` (`0.5` = halfway) |
+| `--every N` | Log every Nth frame |
 | `--max-points N` / `--point-radius R` | Point-cloud density / radius |
 | `--save FILE.rrd` / `--web` | Write a recording / serve a web viewer instead of spawning |
 

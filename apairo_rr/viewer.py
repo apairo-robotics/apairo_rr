@@ -372,8 +372,12 @@ def view(
             xyz = pts[:, :3].astype(np.float64)
 
             # Resolve per-point colouring once (class ids from labels, or RGB).
+            # class_ids colour from an AnnotationContext when cfg is given
+            # (named classes, e.g. semantic segmentation); with no cfg, Rerun
+            # still assigns each id a stable colour automatically -- any
+            # per-point label works, not just a known semantic class table.
             class_ids = colors = None
-            if labels is not None and cfg is not None:
+            if labels is not None:
                 class_ids = labels.astype(np.uint16)
                 radius = point_radius if point_radius is not None else rr.Radius.ui_points(2.0)
             elif pipe.colormap_fn is not None:

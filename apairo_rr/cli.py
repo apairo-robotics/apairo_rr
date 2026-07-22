@@ -16,6 +16,8 @@ view per ``--lidar`` channel, one 2D view per ``--camera`` channel, side by side
         --lidar-frame os_sensor --base-frame base_link
     apairo rerun /path/to/ds --lidar ouster_points --color height \\
         --lidar-frame os_sensor --base-frame base_link --pose dlio_odom_node_odom
+    apairo rerun /path/to/ds --lidar velodyne_0 --labels labels \\
+        --label-config semantic_kitti
 """
 
 from __future__ import annotations
@@ -29,7 +31,16 @@ import numpy as np
 
 import apairo
 
-from apairo_rr import ColumnColormap, ImageChannel, Pipeline, red_blue, view
+from apairo_rr import ColumnColormap, ImageChannel, Pipeline, load_label_config, red_blue, view
+
+# --label-config default per --as: the profiled datasets each have one
+# canonical class table; RawDataset/TartanKittiDataset have none, so --labels
+# on those needs an explicit --label-config.
+_LABEL_CONFIG_BY_CLASS = {
+    "Rellis3DDataset": "rellis",
+    "SemanticKittiDataset": "semantic_kitti",
+    "Goose3DDataset": "goose",
+}
 
 # Dataset classes selectable with ``--as``: the profile-free generic loader plus
 # the profiled datasets whose layout maps canonical channel names from a profile.
@@ -50,6 +61,29 @@ def _split_keys(value: Optional[str]) -> list[str]:
     if not value:
         return []
     return [k.strip() for k in value.split(",") if k.strip()]
+
+
+def _resolve_pos(spec, n: int, default: int) -> int:
+    """Resolve a position *spec* into an index in ``[0, n]``.
+
+    Convention: an **integer** is a frame position (``100``; negative counts from
+    the end), a **float in ``[0, 1]``** is a fraction of the *n* candidate frames
+    (``0.5`` → halfway). ``None`` → *default*. Raises ``ValueError`` on garbage.
+    """
+    if spec is None:
+        return default
+    s = str(spec).strip()
+    try:
+        pos = int(s)                       # integer literal -> frame position
+        if pos < 0:
+            pos += n
+    except ValueError:
+        f = float(s)                       # float literal (raises on garbage)
+        if 0.0 <= f <= 1.0:
+            pos = round(f * n)             # fraction of the sequence
+        else:
+            pos = int(f)                   # float outside [0, 1]: positional
+    return max(0, min(pos, n))
 
 
 def _alias_map(path: Path) -> dict[str, str]:
@@ -149,6 +183,19 @@ def _build_parser() -> argparse.ArgumentParser:
                         "(comma-separated; on-disk names — aliases are resolved)")
     p.add_argument("--camera", metavar="A,B", default=None,
                    help="image channel(s) to show as 2D views (comma-separated)")
+    p.add_argument("--labels", metavar="A,B", default=None,
+                   help="labelled point channel(s) (e.g. ground-truth semantic "
+                        "labels) -- coloured onto the matching --lidar channel's "
+                        "points, not shown as a view of their own. Paired by "
+                        "position with --lidar, or one channel shared by all "
+                        "--lidar channels. These are typically annotated on only "
+                        "a subset of lidar frames -- the viewer replays just "
+                        "that subset.")
+    p.add_argument("--label-config", choices=("rellis", "semantic_kitti", "goose"),
+                   default=None, dest="label_config",
+                   help="optional class colour/name legend for --labels, for a "
+                        "known semantic table (default: inferred from --as, else "
+                        "none -- any label id still colours fine without one)")
     p.add_argument("--color", choices=_COLORS, default="flat",
                    help="point colouring: flat (default), height (z), or range. "
                         "height needs the cloud upright/world — see --lidar-frame / --pose")
@@ -169,7 +216,14 @@ def _build_parser() -> argparse.ArgumentParser:
                    default="RawDataset",
                    help="dataset class to load with (default: RawDataset)")
     p.add_argument("--every", type=int, default=1, help="log every Nth frame")
-    p.add_argument("--idx", type=int, default=0, help="first frame index")
+    p.add_argument("--start", default=None,
+                   help="first frame: an integer position (e.g. 100) or a fraction "
+                        "of the sequence as a float in [0,1] (e.g. 0.5). Overrides --idx.")
+    p.add_argument("--end", default=None,
+                   help="last frame (exclusive): an integer position or a fraction "
+                        "(e.g. 0.8). Default: end of the sequence.")
+    p.add_argument("--idx", type=int, default=0,
+                   help="first frame position (legacy alias of --start)")
     p.add_argument("--max-points", type=int, default=None, dest="max_points",
                    help="subsample each cloud to at most this many points")
     p.add_argument("--point-radius", type=float, default=None, dest="point_radius",
@@ -193,12 +247,31 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     lidar_req = _split_keys(args.lidar)
     camera_req = _split_keys(args.camera)
+    labels_req = _split_keys(args.labels)
     cls = _DATASETS[args.as_]
+
+    if labels_req and len(labels_req) not in (1, len(lidar_req)):
+        print(f"--labels must give one channel (shared by every --lidar channel) "
+              f"or exactly as many as --lidar ({len(lidar_req)}); got "
+              f"{len(labels_req)}.", file=sys.stderr)
+        return 1
+
+    # --sequence naming an actual sub-directory: load *that* sequence directly
+    # instead of the whole root. A root only exposes the channel intersection
+    # across every sequence (see RootSequenceMixin.available), so a channel
+    # that exists in just a few sequences (e.g. a partial ground-truth label
+    # set) would otherwise make the root load fail outright before we ever get
+    # to filter down to the requested sequence.
+    single_sequence = False
+    load_path = path
+    if args.sequence is not None and (path / args.sequence).is_dir():
+        load_path = path / args.sequence
+        single_sequence = True
 
     # No channels requested: load to discover the available keys and list them.
     if not lidar_req and not camera_req:
         try:
-            ds = cls(str(path))
+            ds = cls(str(load_path))
         except Exception as exc:  # noqa: BLE001 -- surface the loader's own message
             print(f"Could not load dataset: {exc}", file=sys.stderr)
             return 1
@@ -208,21 +281,42 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 2
 
     # Resolve aliases: --lidar ouster_points is exposed under its alias "lidar".
-    amap = _alias_map(path)
+    amap = _alias_map(load_path)
     def exposed(k: str) -> str:
         return amap.get(k, k)
 
     pose_req = args.pose
-    keys = list(dict.fromkeys(lidar_req + camera_req + ([pose_req] if pose_req else [])))
+    keys = list(dict.fromkeys(
+        lidar_req + camera_req + labels_req + ([pose_req] if pose_req else [])
+    ))
     try:
-        ds = cls(str(path), keys=keys)
+        ds = cls(str(load_path), keys=keys)
     except Exception as exc:  # noqa: BLE001 -- surface the loader's own message
         print(f"Could not load dataset: {exc}", file=sys.stderr)
         return 1
 
     lidar_x = [exposed(k) for k in lidar_req]
     camera_x = [exposed(k) for k in camera_req]
+    labels_x = [exposed(k) for k in labels_req]
     pose_x = exposed(pose_req) if pose_req else None
+
+    # Pair each --lidar channel with the --labels channel to colour its points
+    # from -- one channel shared by all, or matched 1:1 by position.
+    label_for: dict[str, str] = {}
+    label_cfg = None
+    if labels_x:
+        pairs = labels_x if len(labels_x) == len(lidar_x) else labels_x * len(lidar_x)
+        label_for = dict(zip(lidar_x, pairs))
+        # --label-config is only a legend (class names + fixed colours) for a
+        # known semantic table; any label id colours fine without one -- Rerun
+        # auto-assigns a stable colour per id.
+        label_cfg_name = args.label_config or _LABEL_CONFIG_BY_CLASS.get(args.as_)
+        if label_cfg_name is not None:
+            try:
+                label_cfg = load_label_config(label_cfg_name)
+            except FileNotFoundError as exc:
+                print(str(exc), file=sys.stderr)
+                return 1
 
     # Static mount TF (tilted sensor frame -> upright body frame). Explicit
     # --lidar-frame/--base-frame win; otherwise resolve it automatically so the
@@ -268,8 +362,63 @@ def main(argv: Optional[list[str]] = None) -> int:
             mount = None
             mount_desc = None
 
+    # Frame window: --start/--end take an integer position or a float fraction
+    # in [0,1] of the sequence's frames; --idx is the legacy start; --every strides.
+    start_spec = args.start if args.start is not None else args.idx
+
+    def _valid(spec) -> bool:
+        if spec is None:
+            return True
+        try:
+            float(str(spec).strip())
+            return True
+        except ValueError:
+            return False
+
+    if not (_valid(start_spec) and _valid(args.end)):
+        print("Invalid --start/--end: use an integer position (e.g. 100) or a "
+              "fraction in [0,1] (e.g. 0.5).", file=sys.stderr)
+        return 1
+
+    def _pick(base: list[int]) -> list[int]:
+        n = len(base)
+        lo = _resolve_pos(start_spec, n, 0)
+        hi = _resolve_pos(args.end, n, n)
+        return base[lo:max(lo, hi):args.every]
+
     # ----------------------------------------------------------------- transforms
-    if pose_x:
+    labels_synced = False
+    if labels_x:
+        # Ground-truth label channels are typically annotated on only a subset
+        # of lidar scans and, being async, carry no xyz of their own -- resample
+        # onto the *label* clock so each labelled tick's nearest lidar scan lands
+        # in the same sample (Pipeline.run then colours those points straight
+        # from the paired label channel) and every un-annotated lidar frame is
+        # dropped rather than shown without labels.
+        ref = labels_x[0]
+        others = [k for k in lidar_x + camera_x + labels_x[1:]
+                  + ([pose_x] if pose_x else []) if k != ref]
+        try:
+            ds = ds.synchronize(reference=ref, method={k: "nearest" for k in others})
+            labels_synced = True
+        except ValueError as exc:
+            # Already-synchronous dataset (e.g. a profiled dataset): labels are
+            # already one dense array per frame, nothing to resample onto.
+            if "already synchronous" not in str(exc):
+                raise
+
+    if labels_synced:
+        if pose_x:
+            ds = ds.transform(pose_x, PoseTo4x4())
+        for lk in lidar_x:
+            if args.range_max is not None:
+                ds = ds.transform(lk, RangeFilter(max=args.range_max))
+            if mount is not None:
+                ds = ds.transform(lk, TransformPoints(mount))
+            if pose_x:
+                ds = ds.transform(ApplyPose(lidar=lk, pose=pose_x))
+        frames = _pick(list(range(len(ds))))
+    elif pose_x:
         if not lidar_x:
             print("--pose lifts point clouds into the world frame — pass --lidar too.",
                   file=sys.stderr)
@@ -284,45 +433,56 @@ def main(argv: Optional[list[str]] = None) -> int:
             if mount is not None:
                 ds = ds.transform(lk, TransformPoints(mount))
             ds = ds.transform(ApplyPose(lidar=lk, pose=pose_x))  # dynamic pose -> world frame
-        frames = list(range(args.idx, len(ds), args.every))
+        frames = _pick(list(range(len(ds))))
     else:
         for lk in lidar_x:
             if args.range_max is not None:
                 ds = ds.transform(lk, RangeFilter(max=args.range_max))
             if mount is not None:
                 ds = ds.transform(lk, TransformPoints(mount))
-        seq_ids = list(getattr(ds, "sequence_ids", []) or [])
-        if args.sequence is not None:
-            if args.sequence not in seq_ids:
-                avail = f" Available: {', '.join(seq_ids)}." if seq_ids else ""
-                print(f"Sequence '{args.sequence}' not found.{avail}", file=sys.stderr)
-                return 1
-            # Global frame indices for the sequence via the public provenance API.
-            # ``sequence()._indices`` is local on a RawDataset root (base frame =
-            # the sub-dataset), so feeding it as global indices showed the wrong
-            # sequences — frame_sequence_ids is correctly global on root and profiled.
-            fsi = np.asarray(ds.frame_sequence_ids)
-            frames = np.flatnonzero(fsi == args.sequence)[args.idx::args.every].tolist()
+        if single_sequence:
+            # Already loaded from the sequence's own directory (see load_path
+            # above) -- ds *is* the requested sequence, nothing left to filter.
+            base = list(range(len(ds)))
         else:
-            frames = list(range(args.idx, len(ds), args.every))
+            seq_ids = list(getattr(ds, "sequence_ids", []) or [])
+            if args.sequence is not None:
+                if args.sequence not in seq_ids:
+                    avail = f" Available: {', '.join(seq_ids)}." if seq_ids else ""
+                    print(f"Sequence '{args.sequence}' not found.{avail}", file=sys.stderr)
+                    return 1
+                # Global frame indices for the sequence via the public provenance
+                # API. ``sequence()._indices`` is local on a RawDataset root (base
+                # frame = the sub-dataset), so feeding it as global indices showed
+                # the wrong sequences — frame_sequence_ids is correctly global on
+                # root and profiled.
+                fsi = np.asarray(ds.frame_sequence_ids)
+                base = np.flatnonzero(fsi == args.sequence).tolist()
+            else:
+                base = list(range(len(ds)))
+        frames = _pick(base)
 
     print(f"  {len(ds)} frames"
           f"\n  lidar: {lidar_x or '-'}   camera: {camera_x or '-'}"
           f"   colour: {args.color}"
+          + (f"   labels: {label_for}" if label_for else "")
           + (f"   pose: {pose_x}" if pose_x else "")
           + (f"   mount: {mount_desc}" if mount is not None else "")
-          + f"\n  {len(frames)} frames to log")
+          + f"\n  {len(frames)} frames to log"
+          + (f" (global {frames[0]}–{frames[-1]})" if frames else ""))
 
     colormap_fn = _make_colormap(args.color)
     pipelines = [
-        Pipeline(lk, point_key=lk, label_key=None, colormap_fn=colormap_fn)
+        Pipeline(lk, point_key=lk, label_key=label_for.get(lk), colormap_fn=colormap_fn)
         for lk in lidar_x
     ]
+    label_cfgs = [label_cfg if lk in label_for else None for lk in lidar_x]
     images = [ImageChannel(ck) for ck in camera_x]
 
     view(
         ds,
         pipelines=pipelines,
+        label_cfgs=label_cfgs,
         images=images,
         frames=frames,
         pose_key=pose_x,
