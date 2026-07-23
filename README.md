@@ -1,3 +1,9 @@
+> [!WARNING]
+> **Deprecated — this repository is no longer maintained.**
+> `apairo_rr` has been folded into **[apairo_visu](https://github.com/apairo-robotics/apairo_visu)**
+> as its optional Rerun backend. Install it with `pip install "apairo-visu[rerun]"` and use
+> `apairo_visu.rerun` (or the `apairo rerun …` CLI) instead. The code below is kept for reference only.
+
 # apairo-rr
 
 [Rerun](https://rerun.io) visualisation layer for [apairo](../apairo) datasets.
